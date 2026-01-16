@@ -3,62 +3,51 @@ import time
 import subprocess
 import shutil
 import requests
-import yaml # pip install pyyaml
+import yaml
+import argparse
 from pathlib import Path
 from copy import deepcopy
 
-# ================= 配置區域 =================
-BASE_DIR = Path.home() / "lmcache_docker"
-MODELS_DIR = "/home/young/models" # 宿主機模型路徑
+# ================= 路徑與環境配置 =================
 
-# 定義測試矩陣：在此處新增各種組合
+# 1. 動態定位 src 目錄與專案根目錄
+CURRENT_FILE = Path(__file__).resolve()
+SRC_DIR = CURRENT_FILE.parent           # .../LMCache_benchmark_orchestrator/src
+PROJECT_ROOT = SRC_DIR.parent           # .../LMCache_benchmark_orchestrator
+
+# 2. 定義產出目錄 (所有生成的檔案都放在 runs 資料夾)
+RUNS_DIR = PROJECT_ROOT / "runs"
+
+# 3. 模型路徑 (優先讀取環境變數，否則使用預設值)
+# 使用方法: export LLM_MODELS_DIR="/path/to/your/models"
+MODELS_DIR = os.getenv("LLM_MODELS_DIR", "/home/young/models")
+
+# 4. 測試腳本位置
+TESTER_SCRIPT = SRC_DIR / "latency_tester.py"
+
+print(f"專案根目錄: {PROJECT_ROOT}")
+print(f"模型來源路徑: {MODELS_DIR}")
+print(f"測試工作區: {RUNS_DIR}")
+
+# ================= 測試矩陣 =================
+# 在這裡定義您的各種組合
 TEST_MATRIX = [
-    # 案例 A: 1 Producer (GPU0), 7 Consumers (GPU1-7)
     {
         "id": "1p7d_llama3_70b",
-        "model_path": "/app/model/Llama-3.3-70B-Instruct",
-        "type": "disaggregated", # 分離式架構
+        "model_rel_path": "Llama-3.3-70B-Instruct", # 相對於 MODELS_DIR 的路徑
+        "type": "disaggregated",
         "producers": 1,
         "consumers": 7,
-        "tp_per_instance": 1,    # 每個實例用幾張卡 (70B可能需要量化版才能跑TP1)
-        "gpu_offset": 0          # 從第幾號 GPU 開始
-    },
-    # 案例 B: 2 Producers (GPU0-1), 6 Consumers (GPU2-7)
-    {
-        "id": "2p6d_llama3_70b",
-        "model_path": "/app/model/Llama-3.3-70B-Instruct",
-        "type": "disaggregated",
-        "producers": 2,
-        "consumers": 6,
         "tp_per_instance": 1,
         "gpu_offset": 0
     },
-    # 案例 C: 4 Producers, 4 Consumers
-    {
-        "id": "4p4d_llama3_70b",
-        "model_path": "/app/model/Llama-3.3-70B-Instruct",
-        "type": "disaggregated",
-        "producers": 4,
-        "consumers": 4,
-        "tp_per_instance": 1,
-        "gpu_offset": 0
-    },
-    # 案例 D: 傳統 TP8 (8卡跑一個大模型，無 LMCache) - 作為對照組
-    {
-        "id": "tp8_baseline",
-        "model_path": "/app/model/Llama-3.3-70B-Instruct",
-        "type": "standalone",    # 單體架構
-        "producers": 0,          # 不適用
-        "consumers": 1,          # 1個大實例
-        "tp_per_instance": 8,    # 佔用8張卡
-        "gpu_offset": 0
-    }
+    # 您可以在此加入更多組合 (如 2p6d, tp8_baseline 等)
 ]
 
-# 通用環境變數
+# 通用容器環境變數
 COMMON_ENV = {
     "HF_HOME": "/app/model",
-    "PYTORCH_ROCM_ARCH": "gfx942", # 依照您的 MI300/其他卡調整
+    "PYTORCH_ROCM_ARCH": "gfx942",
     "TORCH_DONT_CHECK_COMPILER_ABI": "1",
     "CXX": "hipcc",
     "BUILD_WITH_HIP": "1",
@@ -67,14 +56,20 @@ COMMON_ENV = {
     "PYTHONHASHSEED": "0"
 }
 
-# ================= 程式邏輯 =================
-
 def generate_docker_compose(config, work_dir):
-    """根據配置動態生成 docker-compose.yaml"""
+    """
+    動態生成 docker-compose.yaml
+    work_dir: 該次測試的專屬目錄 (例如 runs/1p7d_llama3_70b)
+    """
 
     services = {}
+    full_model_path = Path(MODELS_DIR) / config["model_rel_path"]
 
-    # 1. Redis (如果是 LMCache 模式)
+    # 檢查模型路徑是否存在
+    if not full_model_path.exists():
+        print(f"⚠️ 警告: 模型路徑不存在: {full_model_path}")
+
+    # LMCache Redis
     if config["type"] == "disaggregated":
         services["redis"] = {
             "image": "bitnamilegacy/redis:7.4.2-debian-12-r6",
@@ -83,7 +78,7 @@ def generate_docker_compose(config, work_dir):
             "command": 'redis-server --save "" --appendonly no'
         }
 
-    # 基礎 vLLM 設定樣板
+    # vLLM Template
     vllm_template = {
         "image": "rocm/vllm-dev:nightly_main_20260112",
         "network_mode": "host",
@@ -92,9 +87,8 @@ def generate_docker_compose(config, work_dir):
         "security_opt": ["seccomp:unconfined"],
         "devices": ["/dev/kfd:/dev/kfd", "/dev/dri:/dev/dri"],
         "volumes": [
-            f"{MODELS_DIR}:/app/model",
+            f"{full_model_path}:/app/model",
             "./lmcache_config.yaml:/app/lmcache_config.yaml",
-            # 為每個測試 ID 建立獨立的 SHM，避免衝突
             f"/dev/shm/lmcache_{config['id']}:/dev/shm/lmcache_store"
         ],
         "environment": deepcopy(COMMON_ENV)
@@ -103,23 +97,21 @@ def generate_docker_compose(config, work_dir):
     current_gpu_idx = config["gpu_offset"]
     base_port = 8000
 
-    # 生成 Producer 列表
+    # 建立 Producers
     if config["type"] == "disaggregated":
         for i in range(config["producers"]):
             s_name = f"producer_{i}"
             svc = deepcopy(vllm_template)
             svc["container_name"] = f"lmcache_{config['id']}_p{i}"
 
-            # 計算 GPU ID (支援 TP > 1)
             gpus = ",".join([str(x) for x in range(current_gpu_idx, current_gpu_idx + config["tp_per_instance"])])
             current_gpu_idx += config["tp_per_instance"]
 
             svc["environment"]["CUDA_VISIBLE_DEVICES"] = gpus
 
-            # 組裝 Command
             kv_config = '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_producer"}'
             cmd = f"""python3 -m vllm.entrypoints.openai.api_server
-            --model {config['model_path']}
+            --model /app/model
             --port {base_port}
             --tensor-parallel-size {config['tp_per_instance']}
             --max-model-len 8192
@@ -130,7 +122,7 @@ def generate_docker_compose(config, work_dir):
             services[s_name] = svc
             base_port += 1
 
-    # 生成 Consumer 列表 (或是 TP8 的單一實例)
+    # 建立 Consumers (或是 Standalone)
     num_consumers = config["consumers"]
     for i in range(num_consumers):
         s_name = f"consumer_{i}" if config["type"] == "disaggregated" else "vllm_standalone"
@@ -142,14 +134,13 @@ def generate_docker_compose(config, work_dir):
 
         svc["environment"]["CUDA_VISIBLE_DEVICES"] = gpus
 
-        # 組裝 Command
         kv_arg = ""
         if config["type"] == "disaggregated":
              kv_arg = "--kv-transfer-config '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_consumer\"}'"
              svc["depends_on"] = ["redis"]
 
         cmd = f"""python3 -m vllm.entrypoints.openai.api_server
-        --model {config['model_path']}
+        --model /app/model
         --port {base_port}
         --tensor-parallel-size {config['tp_per_instance']}
         --max-model-len 8192
@@ -159,15 +150,12 @@ def generate_docker_compose(config, work_dir):
         services[s_name] = svc
         base_port += 1
 
-    compose_data = {
-        "version": "3.8",
-        "services": services
-    }
-
+    # 寫入 docker-compose.yaml
+    compose_data = {"version": "3.8", "services": services}
     with open(work_dir / "docker-compose.yaml", "w") as f:
         yaml.dump(compose_data, f)
 
-    # 寫入 LMCache config
+    # 寫入 lmcache_config.yaml
     lmcache_conf = """
 chunk_size: 256
 local_device: "cpu"
@@ -177,13 +165,12 @@ remote_serde: "cachegen"
     with open(work_dir / "lmcache_config.yaml", "w") as f:
         f.write(lmcache_conf)
 
-    return base_port # 返回最後使用的 port 的下一個，或者用來計算總數
+    return True
 
 def wait_for_services(ports, timeout=900):
-    """輪詢所有預期的 Port 直到全部 HTTP 200"""
-    print(f"等待服務啟動，目標 Ports: {ports}")
+    """檢查所有 API 是否存活"""
+    print(f"⏳ 等待服務啟動，目標 Ports: {ports}")
     start_time = time.time()
-
     pending_ports = set(ports)
 
     while pending_ports:
@@ -193,9 +180,7 @@ def wait_for_services(ports, timeout=900):
 
         for port in list(pending_ports):
             try:
-                # 簡單檢查 health
-                url = f"http://localhost:{port}/v1/models"
-                requests.get(url, timeout=2)
+                requests.get(f"http://localhost:{port}/v1/models", timeout=2)
                 print(f"✅ Port {port} 已就緒")
                 pending_ports.remove(port)
             except:
@@ -203,28 +188,27 @@ def wait_for_services(ports, timeout=900):
 
         if pending_ports:
             time.sleep(10)
-            print(f"尚在等待: {pending_ports} ({int(time.time() - start_time)}s)")
 
     return True
 
 def run_single_benchmark(config):
     test_id = config["id"]
-    work_dir = BASE_DIR / test_id
+    work_dir = RUNS_DIR / test_id
+
+    # 清理並重建工作目錄
     if work_dir.exists():
         shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n================ 開始測試: {test_id} ================")
-    print(f"配置: {config['type']}, P:{config.get('producers')}, C:{config['consumers']}, TP:{config['tp_per_instance']}")
-
     generate_docker_compose(config, work_dir)
 
     try:
-        # 1. 啟動容器
+        # 啟動環境
+        print(f"🚀 啟動 Docker 環境 (Dir: {work_dir})...")
         subprocess.run(["docker", "compose", "up", "-d"], cwd=work_dir, check=True)
 
-        # 2. 計算預期的 Port 列表
-        # 邏輯必須跟 generate_docker_compose 一致
+        # 計算 Ports
         start_port = 8000
         producer_ports = []
         consumer_ports = []
@@ -237,42 +221,48 @@ def run_single_benchmark(config):
                 consumer_ports.append(start_port)
                 start_port += 1
         else:
-            # Standalone mode
-            consumer_ports.append(start_port) # 只有一個服務，視為 consumer
+            consumer_ports.append(start_port)
             start_port += 1
 
         all_ports = producer_ports + consumer_ports
 
-        # 3. 等待就緒
+        # 等待並執行測試
         if wait_for_services(all_ports):
-            # 4. 呼叫測試腳本
-            # 組裝參數傳給測試腳本
             p_urls = ",".join([f"http://localhost:{p}/v1" for p in producer_ports])
             c_urls = ",".join([f"http://localhost:{p}/v1" for p in consumer_ports])
 
-            cmd = ["uv", "run", "latency_tester.py",
-                   "--test-id", test_id,
-                   "--producers", p_urls,
-                   "--consumers", c_urls]
+            # 呼叫測試腳本，並指定輸出目錄
+            cmd = [
+                "uv", "run", str(TESTER_SCRIPT),
+                "--test-id", test_id,
+                "--producers", p_urls,
+                "--consumers", c_urls,
+                "--output-dir", str(work_dir) # 將結果存在對應的工作目錄
+            ]
 
-            print(f"執行測試腳本: {' '.join(cmd)}")
-            subprocess.run(cmd, cwd=BASE_DIR / "tests", check=True)
+            print(f"🧪 執行測試腳本...")
+            subprocess.run(cmd, check=True)
         else:
-            print("測試跳過：服務啟動失敗")
+            print("⚠️ 測試跳過：服務啟動失敗")
 
     except Exception as e:
-        print(f"發生錯誤: {e}")
+        print(f"❌ 發生錯誤: {e}")
     finally:
-        print(f"正在清理 {test_id}...")
+        # 清理環境
+        print(f"🧹 正在清理 {test_id}...")
         subprocess.run(["docker", "compose", "down"], cwd=work_dir)
-        # 額外清理：確保 Redis 資料不殘留 (雖然 docker down 會移除容器，但 shm 要小心)
-        # 我們的 volume 是掛載到 host 的 /dev/shm/lmcache_{id}，docker down 不會刪除它，手動刪除比較乾淨
+
+        # 清理 SHM (重要)
         shm_path = Path(f"/dev/shm/lmcache_{test_id}")
         if shm_path.exists():
             shutil.rmtree(shm_path, ignore_errors=True)
 
 if __name__ == "__main__":
-    # 確保 uv 有安裝，或改用 python
+    if not MODELS_DIR or not Path(MODELS_DIR).exists():
+        print(f"❌ 錯誤：模型目錄 {MODELS_DIR} 不存在。")
+        print("請設定環境變數: export LLM_MODELS_DIR='/path/to/models'")
+        exit(1)
+
     for config in TEST_MATRIX:
         run_single_benchmark(config)
-        time.sleep(5) # 緩衝時間讓 GPU 記憶體釋放完全
+        time.sleep(5)
