@@ -47,10 +47,9 @@ COMMON_ENV = {
 def generate_docker_compose(config, work_dir):
     """
     生成配置並返回 port_map 以供後續追蹤
-    return: dict {port: container_name}
     """
     services = {}
-    port_map = {} # 新增：記錄 port 對應的容器名稱
+    port_map = {}
 
     full_model_path = Path(MODELS_DIR) / config["model_rel_path"]
     if not full_model_path.exists():
@@ -83,6 +82,9 @@ def generate_docker_compose(config, work_dir):
     current_gpu_idx = config["gpu_offset"]
     base_port = 8000
 
+    def get_kv_config(role):
+        return f'\\"kv_connector\\":\\"LMCacheConnectorV1\\", \\"kv_role\\":\\"{role}\\"'
+
     # Producers
     if config["type"] == "disaggregated":
         for i in range(config["producers"]):
@@ -96,16 +98,16 @@ def generate_docker_compose(config, work_dir):
             current_gpu_idx += config["tp_per_instance"]
 
             svc["environment"]["CUDA_VISIBLE_DEVICES"] = gpus
-            kv_config = '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_producer"}'
+
+            kv_json = "{" + get_kv_config("kv_producer") + "}"
             cmd = f"""python3 -m vllm.entrypoints.openai.api_server
             --model /app/model --port {base_port} --tensor-parallel-size {config['tp_per_instance']}
-            --max-model-len 8192 --kv-transfer-config '{kv_config}'"""
+            --max-model-len 8192 --kv-transfer-config "{kv_json}" """
+
             svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
             svc["depends_on"] = ["redis"]
 
             services[s_name] = svc
-
-            # 紀錄映射
             port_map[base_port] = container_name
             base_port += 1
 
@@ -125,17 +127,16 @@ def generate_docker_compose(config, work_dir):
 
         kv_arg = ""
         if config["type"] == "disaggregated":
-             kv_arg = "--kv-transfer-config '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_consumer\"}'"
+             kv_json = "{" + get_kv_config("kv_consumer") + "}"
+             kv_arg = f'--kv-transfer-config "{kv_json}"'
              svc["depends_on"] = ["redis"]
 
         cmd = f"""python3 -m vllm.entrypoints.openai.api_server
         --model /app/model --port {base_port} --tensor-parallel-size {config['tp_per_instance']}
         --max-model-len 8192 {kv_arg}"""
+
         svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
-
         services[s_name] = svc
-
-        # 紀錄映射
         port_map[base_port] = container_name
         base_port += 1
 
@@ -155,21 +156,15 @@ remote_serde: "cachegen"
     return port_map
 
 def print_container_logs(container_name):
-    """印出指定容器的最後 100 行 Log"""
     print(f"\n🔴 [DEBUG] Dump Log for: {container_name}")
     print("=" * 60)
     try:
-        # 使用 subprocess 直接呼叫 docker logs
-        subprocess.run(["docker", "logs", "--tail", "100", container_name], check=False)
+        subprocess.run(["docker", "logs", "--tail", "50", container_name], check=False)
     except Exception as e:
         print(f"無法取得 Log: {e}")
     print("=" * 60 + "\n")
 
 def wait_for_services(port_map, timeout=900):
-    """
-    檢查服務是否就緒，若 Timeout 則印出失敗容器的 Log
-    port_map: {port: container_name}
-    """
     ports = list(port_map.keys())
     print(f"⏳ 等待服務啟動 (Timeout: {timeout}s)... 目標 Ports: {ports}")
 
@@ -177,22 +172,17 @@ def wait_for_services(port_map, timeout=900):
     pending_ports = set(ports)
 
     while pending_ports:
-        # 檢查是否超時
         if time.time() - start_time > timeout:
-            print(f"\n❌ 啟動逾時！經過了 {timeout} 秒。")
-            print(f"❌ 以下 Ports 無法連線: {pending_ports}")
-
-            # 針對沒起來的 Port，找出對應的容器並印出 Log
+            print(f"\n❌ 啟動逾時！")
             for p in pending_ports:
                 c_name = port_map.get(p, "unknown")
                 print_container_logs(c_name)
             return False
 
-        # 輪詢檢查
         for port in list(pending_ports):
             try:
                 requests.get(f"http://localhost:{port}/v1/models", timeout=2)
-                print(f"✅ Port {port} ({port_map[port]}) 已就緒")
+                print(f"✅ Port {port} 已就緒")
                 pending_ports.remove(port)
             except:
                 pass
@@ -200,8 +190,8 @@ def wait_for_services(port_map, timeout=900):
         if pending_ports:
             time.sleep(10)
             elapsed = int(time.time() - start_time)
-            if elapsed % 30 == 0: # 每30秒印一次進度
-                print(f"   ...已等待 {elapsed}s，剩餘: {len(pending_ports)} 個服務")
+            if elapsed % 30 == 0:
+                print(f"   ...已等待 {elapsed}s，剩餘: {len(pending_ports)}")
 
     return True
 
@@ -215,18 +205,13 @@ def run_single_benchmark(config):
 
     print(f"\n================ 開始測試: {test_id} ================")
 
-    # 1. 生成配置並取得 Port Map
     port_map = generate_docker_compose(config, work_dir)
 
     try:
         print(f"🚀 啟動 Docker 環境 (Dir: {work_dir})...")
         subprocess.run(["docker", "compose", "up", "-d"], cwd=work_dir, check=True)
 
-        # 2. 等待服務就緒 (傳入 map 以便報錯)
-        if wait_for_services(port_map, timeout=900): # 15分鐘 Timeout (70B 模型載入較慢)
-
-            # 分離 Producer 和 Consumer 的 URL
-            # 根據 config 的數量來切分，這裡邏輯要跟 generate 對齊
+        if wait_for_services(port_map, timeout=900):
             sorted_ports = sorted(port_map.keys())
             p_count = config.get("producers", 0)
 
@@ -255,7 +240,6 @@ def run_single_benchmark(config):
     finally:
         print(f"🧹 正在清理 {test_id}...")
         subprocess.run(["docker", "compose", "down"], cwd=work_dir)
-
         shm_path = Path(f"/dev/shm/lmcache_{test_id}")
         if shm_path.exists():
             shutil.rmtree(shm_path, ignore_errors=True)
@@ -267,5 +251,4 @@ if __name__ == "__main__":
 
     for config in TEST_MATRIX:
         run_single_benchmark(config)
-        # 給 GPU 記憶體一點時間完全釋放
         time.sleep(10)
