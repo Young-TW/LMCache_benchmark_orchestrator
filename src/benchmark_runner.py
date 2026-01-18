@@ -17,8 +17,14 @@ RUNS_DIR = PROJECT_ROOT / "runs"
 MODELS_DIR = os.getenv("LLM_MODELS_DIR", "/home/young/models")
 TESTER_SCRIPT = SRC_DIR / "latency_tester.py"
 
+# LMCache Source Config
+LMCACHE_REPO = "https://github.com/Young-TW/LMCache.git"
+LMCACHE_COMMIT = "505cd45d494d976acaf8d26e5aa598f30a6ea790"
+LMCACHE_SRC_DIR = PROJECT_ROOT / "LMCache_src"
+
 print(f"專案根目錄: {PROJECT_ROOT}")
 print(f"模型來源路徑: {MODELS_DIR}")
+print(f"LMCache 原始碼: {LMCACHE_SRC_DIR}")
 
 # ================= 測試矩陣 =================
 TEST_MATRIX = [
@@ -44,9 +50,22 @@ COMMON_ENV = {
     "PYTHONHASHSEED": "0"
 }
 
+def prepare_lmcache_source():
+    """Clone LMCache repo and checkout specific commit on host."""
+    # 1. Clone
+    if not LMCACHE_SRC_DIR.exists():
+        print(f"📥 Cloning LMCache from {LMCACHE_REPO}...")
+        subprocess.run(["git", "clone", LMCACHE_REPO, str(LMCACHE_SRC_DIR)], check=True)
+
+    # 2. Checkout
+    print(f"🔄 Checking out commit {LMCACHE_COMMIT}...")
+    subprocess.run(["git", "fetch", "--all"], cwd=LMCACHE_SRC_DIR, check=True)
+    subprocess.run(["git", "checkout", LMCACHE_COMMIT], cwd=LMCACHE_SRC_DIR, check=True)
+    print("✅ Source code prepared.")
+
 def generate_docker_compose(config, work_dir):
     """
-    生成配置並返回 port_map 以供後續追蹤
+    Generate docker-compose.yaml using --no-build-isolation for pip
     """
     services = {}
     port_map = {}
@@ -74,7 +93,9 @@ def generate_docker_compose(config, work_dir):
         "volumes": [
             f"{full_model_path}:/app/model",
             "./lmcache_config.yaml:/app/lmcache_config.yaml",
-            f"/dev/shm/lmcache_{config['id']}:/dev/shm/lmcache_store"
+            f"/dev/shm/lmcache_{config['id']}:/dev/shm/lmcache_store",
+            # Mount LMCache source code
+            f"{LMCACHE_SRC_DIR}:/app/LMCache_src"
         ],
         "environment": deepcopy(COMMON_ENV)
     }
@@ -84,6 +105,21 @@ def generate_docker_compose(config, work_dir):
 
     def get_kv_config(role):
         return f'\\"kv_connector\\":\\"LMCacheConnectorV1\\", \\"kv_role\\":\\"{role}\\"'
+
+    # Helper to construct command
+    def build_command(role_json_content, port, gpu_count):
+        kv_json = "{" + role_json_content + "}"
+
+        # [關鍵修正] 加入 --no-build-isolation
+        # 這樣 pip 就會使用容器內原本已經裝好的 ROCm PyTorch，而不會嘗試去下載不相容的版本
+        install_cmd = "python3 -m pip install --no-build-isolation -e /app/LMCache_src &&"
+
+        vllm_cmd = f"""python3 -m vllm.entrypoints.openai.api_server
+        --model /app/model --port {port} --tensor-parallel-size {gpu_count}
+        --max-model-len 8192 --kv-transfer-config "{kv_json}" """
+
+        full_cmd = f"{install_cmd} {vllm_cmd}"
+        return "bash -c '" + full_cmd.replace("\n", " ") + "'"
 
     # Producers
     if config["type"] == "disaggregated":
@@ -99,12 +135,11 @@ def generate_docker_compose(config, work_dir):
 
             svc["environment"]["CUDA_VISIBLE_DEVICES"] = gpus
 
-            kv_json = "{" + get_kv_config("kv_producer") + "}"
-            cmd = f"""python3 -m vllm.entrypoints.openai.api_server
-            --model /app/model --port {base_port} --tensor-parallel-size {config['tp_per_instance']}
-            --max-model-len 8192 --kv-transfer-config "{kv_json}" """
-
-            svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
+            svc["command"] = build_command(
+                get_kv_config("kv_producer"),
+                base_port,
+                config['tp_per_instance']
+            )
             svc["depends_on"] = ["redis"]
 
             services[s_name] = svc
@@ -125,17 +160,17 @@ def generate_docker_compose(config, work_dir):
 
         svc["environment"]["CUDA_VISIBLE_DEVICES"] = gpus
 
-        kv_arg = ""
+        kv_role_config = ""
         if config["type"] == "disaggregated":
-             kv_json = "{" + get_kv_config("kv_consumer") + "}"
-             kv_arg = f'--kv-transfer-config "{kv_json}"'
+             kv_role_config = get_kv_config("kv_consumer")
              svc["depends_on"] = ["redis"]
+             svc["command"] = build_command(kv_role_config, base_port, config['tp_per_instance'])
+        else:
+             cmd = f"""python3 -m vllm.entrypoints.openai.api_server
+             --model /app/model --port {base_port} --tensor-parallel-size {config['tp_per_instance']}
+             --max-model-len 8192"""
+             svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
 
-        cmd = f"""python3 -m vllm.entrypoints.openai.api_server
-        --model /app/model --port {base_port} --tensor-parallel-size {config['tp_per_instance']}
-        --max-model-len 8192 {kv_arg}"""
-
-        svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
         services[s_name] = svc
         port_map[base_port] = container_name
         base_port += 1
@@ -248,6 +283,8 @@ if __name__ == "__main__":
     if not MODELS_DIR or not Path(MODELS_DIR).exists():
         print(f"❌ 錯誤：模型目錄 {MODELS_DIR} 不存在。")
         exit(1)
+
+    prepare_lmcache_source()
 
     for config in TEST_MATRIX:
         run_single_benchmark(config)
