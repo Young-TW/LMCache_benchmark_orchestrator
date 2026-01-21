@@ -102,7 +102,7 @@ TEST_PROMPTS = [
     """
 ]
 
-LONG_PROMPT = TEST_PROMPTS[2] * 10
+LONG_PROMPT = (TEST_PROMPTS[0] + TEST_PROMPTS[1] + TEST_PROMPTS[2] + TEST_PROMPTS[3] + TEST_PROMPTS[4]) * 20
 
 def measure_request(client, model_name, prompt, max_tokens=20):
     start_time = time.time()

@@ -37,6 +37,51 @@ TEST_MATRIX = [
         "tp_per_instance": 1,
         "gpu_offset": 0
     },
+    {
+        "id": "2p6d_llama3_70b",
+        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "type": "disaggregated",
+        "producers": 2,
+        "consumers": 6,
+        "tp_per_instance": 1,
+        "gpu_offset": 0
+    },
+    {
+        "id": "4p4d_llama3_70b",
+        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "type": "disaggregated",
+        "producers": 4,
+        "consumers": 4,
+        "tp_per_instance": 1,
+        "gpu_offset": 0
+    },
+    {
+        "id": "1p7d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
+        "type": "disaggregated",
+        "producers": 1,
+        "consumers": 7,
+        "tp_per_instance": 1,
+        "gpu_offset": 0
+    },
+    {
+        "id": "2p6d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
+        "type": "disaggregated",
+        "producers": 2,
+        "consumers": 6,
+        "tp_per_instance": 1,
+        "gpu_offset": 0
+    },
+    {
+        "id": "4p4d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
+        "type": "disaggregated",
+        "producers": 4,
+        "consumers": 4,
+        "tp_per_instance": 1,
+        "gpu_offset": 0
+    },
 ]
 
 COMMON_ENV = {
@@ -116,7 +161,7 @@ def generate_docker_compose(config, work_dir):
 
         vllm_cmd = f"""python3 -m vllm.entrypoints.openai.api_server
         --model /app/model --port {port} --tensor-parallel-size {gpu_count}
-        --max-model-len 8192 --kv-transfer-config "{kv_json}" """
+        --max-model-len 32768 --kv-transfer-config "{kv_json}" """
 
         full_cmd = f"{install_cmd} {vllm_cmd}"
         return "bash -c '" + full_cmd.replace("\n", " ") + "'"
@@ -166,10 +211,13 @@ def generate_docker_compose(config, work_dir):
              svc["depends_on"] = ["redis"]
              svc["command"] = build_command(kv_role_config, base_port, config['tp_per_instance'])
         else:
-             cmd = f"""python3 -m vllm.entrypoints.openai.api_server
-             --model /app/model --port {base_port} --tensor-parallel-size {config['tp_per_instance']}
-             --max-model-len 8192"""
-             svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
+            cmd = f"""python3 -m vllm.entrypoints.openai.api_server \
+                --model /app/model \
+                --port {base_port} \
+                --tensor-parallel-size {config['tp_per_instance']} \
+                --gpu-memory-utilization 0.95 \
+                --max-model-len 32768"""
+            svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
 
         services[s_name] = svc
         port_map[base_port] = container_name
@@ -180,7 +228,7 @@ def generate_docker_compose(config, work_dir):
         yaml.dump({"version": "3.8", "services": services}, f)
 
     lmcache_conf = """
-chunk_size: 256
+chunk_size: 2048
 local_device: "cpu"
 remote_url: "redis://localhost:6379"
 remote_serde: "cachegen"
