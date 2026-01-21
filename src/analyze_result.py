@@ -97,7 +97,7 @@ def plot_charts(df):
         plt.ylabel("Time to First Token (seconds)")
         plt.xlabel("Topology Configuration")
 
-        output_file = PROJECT_ROOT / f"benchmark_{model}.png"
+        output_file = PROJECT_ROOT / "plots" / f"benchmark_{model}.png"
         plt.savefig(output_file)
         print(f"📈 圖表已儲存: {output_file}")
         plt.close()
