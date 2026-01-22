@@ -102,12 +102,20 @@ TEST_PROMPTS = [
     """
 ]
 
+# Concatenate prompts to create a sufficiently long context for prefill testing
 LONG_PROMPT = (TEST_PROMPTS[0] + TEST_PROMPTS[1] + TEST_PROMPTS[2] + TEST_PROMPTS[3] + TEST_PROMPTS[4]) * 20
 
 def measure_request(client, model_name, prompt, max_tokens=20):
+    """
+    Sends a request to the model and measures:
+    1. TTFT (Time To First Token)
+    2. Total Latency
+    3. TPS (Tokens Per Second)
+    """
     start_time = time.time()
     ttft = 0
     first_token_time = 0
+    token_count = 0
 
     try:
         stream = client.chat.completions.create(
@@ -119,16 +127,36 @@ def measure_request(client, model_name, prompt, max_tokens=20):
         )
 
         for chunk in stream:
+            # In vLLM streaming, each chunk typically corresponds to one token
             if chunk.choices[0].delta.content is not None:
+                token_count += 1
                 if first_token_time == 0:
                     first_token_time = time.time()
                     ttft = first_token_time - start_time
 
-        total_time = time.time() - start_time
-        return {"ttft": ttft, "total": total_time, "success": True}
+        end_time = time.time()
+        total_time = end_time - start_time
+
+        # Calculate TPS (End-to-End)
+        tps = token_count / total_time if total_time > 0 else 0
+
+        return {
+            "ttft": ttft,
+            "total": total_time,
+            "tps": tps,
+            "tokens": token_count,
+            "success": True
+        }
     except Exception as e:
         print(f"Request failed: {e}")
-        return {"ttft": 0, "total": 0, "success": False, "error": str(e)}
+        return {
+            "ttft": 0,
+            "total": 0,
+            "tps": 0,
+            "tokens": 0,
+            "success": False,
+            "error": str(e)
+        }
 
 def main():
     parser = argparse.ArgumentParser()
@@ -138,7 +166,7 @@ def main():
     parser.add_argument("--output-dir", default=".", help="Directory to save the results")
     args = parser.parse_args()
 
-    # 確保輸出目錄存在
+    # Ensure output directory exists
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -155,7 +183,7 @@ def main():
         "metrics": {}
     }
 
-    # 取得模型名稱
+    # Retrieve model name
     try:
         temp_client = OpenAI(base_url=consumer_urls[0], api_key="EMPTY")
         model_list = temp_client.models.list()
@@ -173,7 +201,7 @@ def main():
         print("Step 1: 請求 Producer (Prefill)...")
         p_res = measure_request(p_client, model_name, LONG_PROMPT)
         results["metrics"]["producer_prefill"] = p_res
-        print(f"Producer TTFT: {p_res['ttft']:.4f}s")
+        print(f"Producer TTFT: {p_res['ttft']:.4f}s | TPS: {p_res['tps']:.2f}")
 
         time.sleep(2)
 
@@ -185,12 +213,16 @@ def main():
             print(f"  Testing Consumer {i} ({c_url})...")
             res = measure_request(c_client, model_name, LONG_PROMPT)
             c_results.append(res)
-            print(f"  Consumer {i} TTFT: {res['ttft']:.4f}s")
+            print(f"  Consumer {i} TTFT: {res['ttft']:.4f}s | TPS: {res['tps']:.2f}")
 
-        valid_ttfts = [r['ttft'] for r in c_results if r['success']]
-        if valid_ttfts:
-            avg_c_ttft = statistics.mean(valid_ttfts)
+        # Calculate averages for Consumers
+        valid_results = [r for r in c_results if r['success']]
+        if valid_results:
+            avg_c_ttft = statistics.mean([r['ttft'] for r in valid_results])
+            avg_c_tps = statistics.mean([r['tps'] for r in valid_results])
+
             results["metrics"]["consumer_avg_ttft"] = avg_c_ttft
+            results["metrics"]["consumer_avg_tps"] = avg_c_tps
 
             if avg_c_ttft > 0 and p_res['ttft'] > 0:
                 speedup = p_res['ttft'] / avg_c_ttft
@@ -205,13 +237,14 @@ def main():
         print("Step 1: 請求 Standalone Node...")
         res = measure_request(c_client, model_name, LONG_PROMPT)
         results["metrics"]["baseline_run1"] = res
-        print(f"Baseline TTFT: {res['ttft']:.4f}s")
+        print(f"Baseline TTFT: {res['ttft']:.4f}s | TPS: {res['tps']:.2f}")
 
         print("Step 2: 再次請求 (Check local cache)...")
         res2 = measure_request(c_client, model_name, LONG_PROMPT)
         results["metrics"]["baseline_run2"] = res2
+        print(f"Baseline (Run2) TTFT: {res2['ttft']:.4f}s | TPS: {res2['tps']:.2f}")
 
-    # 寫入結果
+    # Write results to file
     outfile = output_path / f"report_{args.test_id}.toml"
     with open(outfile, "wb") as f:
         tomli_w.dump(results, f)

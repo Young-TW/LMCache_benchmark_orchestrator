@@ -9,6 +9,7 @@ from pathlib import Path
 CURRENT_FILE = Path(__file__).resolve()
 PROJECT_ROOT = CURRENT_FILE.parent.parent
 RUNS_DIR = PROJECT_ROOT / "runs"
+PLOTS_DIR = PROJECT_ROOT / "plots"
 
 def load_reports():
     data = []
@@ -23,18 +24,23 @@ def load_reports():
             metrics = report.get("metrics", {})
             config = report.get("config", {})
 
-            # 解析測試組態 (例如從 ID 解析 1p7d, 2p6d)
+            # 解析測試組態
             parts = test_id.split('_')
             topology = parts[0] if len(parts) > 0 else "unknown"
-            # 處理像 llama3_70b_tp1 這種多段的情況
             model_tag = "_".join(parts[1:]) if len(parts) > 1 else "unknown"
 
-            # 提取數據
+            # 提取數據: TTFT
             p_ttft = metrics.get("producer_prefill", {}).get("ttft", 0)
             c_ttft = metrics.get("consumer_avg_ttft", 0)
+
+            # 提取數據: TPS (Tokens Per Second)
+            p_tps = metrics.get("producer_prefill", {}).get("tps", 0)
+            c_tps = metrics.get("consumer_avg_tps", 0)
+
+            # 提取數據: Speedup
             speedup = metrics.get("speedup_ratio", 0)
 
-            # 如果報告沒算 speedup 但有 ttft，我們自己算
+            # 自動補算 Speedup
             if speedup == 0 and c_ttft > 0 and p_ttft > 0:
                 speedup = p_ttft / c_ttft
 
@@ -43,10 +49,12 @@ def load_reports():
                     "Test ID": test_id,
                     "Model": model_tag,
                     "Topology": topology,
-                    "Producer (P)": config.get("producer_count", 0),
-                    "Consumer (C)": config.get("consumer_count", 0),
+                    "P_Count": config.get("producer_count", 0),
+                    "C_Count": config.get("consumer_count", 0),
                     "Producer TTFT (s)": round(p_ttft, 4),
                     "Consumer TTFT (s)": round(c_ttft, 4),
+                    "Producer TPS": round(p_tps, 2),
+                    "Consumer TPS": round(c_tps, 2),
                     "Speedup (x)": round(speedup, 2)
                 })
         except Exception as e:
@@ -59,21 +67,26 @@ def print_summary_table(df):
         print("沒有找到任何測試數據。")
         return
 
+    # 依照模型和拓撲排序
     df_sorted = df.sort_values(by=["Model", "Topology"])
 
-    print("\n" + "="*80)
-    print("📊 LMCache Benchmark Summary")
-    print("="*80)
-    # 若有安裝 tabulate 庫，to_markdown 會更好看
+    print("\n" + "="*100)
+    print("📊 LMCache Benchmark Summary (Latency & Throughput)")
+    print("="*100)
     try:
-        print(df_sorted.to_markdown(index=False))
+        # 挑選關鍵欄位顯示
+        view_cols = ["Model", "Topology", "Producer TTFT (s)", "Consumer TTFT (s)", "Producer TPS", "Consumer TPS", "Speedup (x)"]
+        print(df_sorted[view_cols].to_markdown(index=False))
     except ImportError:
         print(df_sorted.to_string(index=False))
-    print("="*80 + "\n")
+    print("="*100 + "\n")
 
 def plot_charts(df):
     if df.empty:
         return
+
+    # 確保 plots 目錄存在
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # 設定全域繪圖風格
     sns.set_theme(style="whitegrid")
@@ -81,11 +94,10 @@ def plot_charts(df):
     models = df["Model"].unique()
 
     for model in models:
-        # 依照拓撲排序 (例如 1p1d, 1p2d...)，這裡簡單用字串排序，若需特定順序可自定義
         model_df = df[df["Model"] == model].sort_values("Topology")
 
-        # --- 圖表 1: TTFT 比較 (Producer vs Consumer) ---
-        df_melted = model_df.melt(
+        # --- 圖表 1: TTFT (延遲比較) ---
+        df_ttft = model_df.melt(
             id_vars=["Topology"],
             value_vars=["Producer TTFT (s)", "Consumer TTFT (s)"],
             var_name="Role",
@@ -94,55 +106,60 @@ def plot_charts(df):
 
         plt.figure(figsize=(12, 6))
         ax1 = sns.barplot(
-            data=df_melted,
-            x="Topology",
-            y="Time (s)",
-            hue="Role",
-            palette=["#e74c3c", "#2ecc71"] # 紅色代表耗時(Producer), 綠色代表快速(Consumer)
+            data=df_ttft, x="Topology", y="Time (s)", hue="Role",
+            palette=["#e74c3c", "#2ecc71"] # 紅(慢) vs 綠(快)
         )
-
         for container in ax1.containers:
             ax1.bar_label(container, fmt='%.2f')
 
-        plt.title(f"LMCache Latency Analysis: {model}")
-        plt.ylabel("Time to First Token (seconds)")
-        plt.xlabel("Topology Configuration")
+        plt.title(f"LMCache Latency (TTFT): {model}")
+        plt.ylabel("Time to First Token (seconds) [Lower is Better]")
+        plt.xlabel("Topology")
         plt.tight_layout()
-
-        output_file_ttft = PROJECT_ROOT / "plots" / f"benchmark_ttft_{model}.png"
-        plt.savefig(output_file_ttft)
-        print(f"📈 TTFT 圖表已儲存: {output_file_ttft}")
+        plt.savefig(PLOTS_DIR / f"benchmark_ttft_{model}.png")
         plt.close()
 
-        # --- 圖表 2: Speedup Ratio (加速比) ---
-        plt.figure(figsize=(12, 6))
-
-        # 使用漸層色，加速越快顏色越深
-        ax2 = sns.barplot(
-            data=model_df,
-            x="Topology",
-            y="Speedup (x)",
-            hue="Topology", # 根據拓撲上色
-            palette="viridis",
-            legend=False
+        # --- 圖表 2: TPS (吞吐量比較) ---
+        df_tps = model_df.melt(
+            id_vars=["Topology"],
+            value_vars=["Producer TPS", "Consumer TPS"],
+            var_name="Role",
+            value_name="Tokens/sec"
         )
 
-        # 加上數值標籤
+        plt.figure(figsize=(12, 6))
+        ax2 = sns.barplot(
+            data=df_tps, x="Topology", y="Tokens/sec", hue="Role",
+            palette=["#f39c12", "#3498db"] # 橘(Producer) vs 藍(Consumer)
+        )
         for container in ax2.containers:
-            ax2.bar_label(container, fmt='%.2fx', padding=3)
+            ax2.bar_label(container, fmt='%.1f')
 
-        # 加一條 1x 的基準線 (雖然 LMCache 肯定大於 1)
-        plt.axhline(1, color='red', linestyle='--', linewidth=1, label="Baseline (1x)")
-
-        plt.title(f"LMCache Speedup Ratio: {model}")
-        plt.ylabel("Speedup Factor (Higher is Better)")
-        plt.xlabel("Topology Configuration")
+        plt.title(f"LMCache Throughput (TPS): {model}")
+        plt.ylabel("Tokens Per Second [Higher is Better]")
+        plt.xlabel("Topology")
         plt.tight_layout()
-
-        output_file_speedup = PROJECT_ROOT / "plots" / f"benchmark_speedup_{model}.png"
-        plt.savefig(output_file_speedup)
-        print(f"🚀 Speedup 圖表已儲存: {output_file_speedup}")
+        plt.savefig(PLOTS_DIR / f"benchmark_tps_{model}.png")
         plt.close()
+
+        # --- 圖表 3: Speedup Ratio (加速倍率) ---
+        plt.figure(figsize=(12, 6))
+        ax3 = sns.barplot(
+            data=model_df, x="Topology", y="Speedup (x)", hue="Topology",
+            palette="viridis", legend=False
+        )
+        for container in ax3.containers:
+            ax3.bar_label(container, fmt='%.2fx', padding=3)
+
+        plt.axhline(1, color='red', linestyle='--', linewidth=1, label="Baseline (1x)")
+        plt.title(f"LMCache Prefill Speedup Ratio: {model}")
+        plt.ylabel("Speedup Factor")
+        plt.xlabel("Topology")
+        plt.tight_layout()
+        plt.savefig(PLOTS_DIR / f"benchmark_speedup_{model}.png")
+        plt.close()
+
+    print(f"📈 所有圖表已儲存至: {PLOTS_DIR}")
 
 if __name__ == "__main__":
     df = load_reports()
