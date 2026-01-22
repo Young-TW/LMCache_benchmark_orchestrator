@@ -28,26 +28,37 @@ print(f"LMCache 原始碼: {LMCACHE_SRC_DIR}")
 
 # ================= 測試矩陣 =================
 TEST_MATRIX = [
+    # --- Baseline: TP8 kv_both ---
+    {
+        "id": "1n_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
+        "type": "kv_both",          # 新增這種類型
+        "producer_count": 0,        # kv_both 不需要獨立的 producer
+        "producer_tp": 0,
+        "consumer_count": 1,        # 單一實例
+        "consumer_tp": 8,           # TP=8
+        "gpu_offset": 0
+    },
     # --- Producer TP = 1 ---
     {
-        "id": "1p1d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "1p1d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 1,
         "consumer_count": 1, "consumer_tp": 1,
         "gpu_offset": 0
     },
     {
-        "id": "1p2d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "1p2d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 1,
         "consumer_count": 1, "consumer_tp": 2,
         "gpu_offset": 0
     },
     {
-        "id": "1p4d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "1p4d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 1,
         "consumer_count": 1, "consumer_tp": 4,
@@ -56,24 +67,24 @@ TEST_MATRIX = [
 
     # --- Producer TP = 2 ---
     {
-        "id": "2p1d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "2p1d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 2,
         "consumer_count": 1, "consumer_tp": 1,
         "gpu_offset": 0
     },
     {
-        "id": "2p2d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "2p2d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 2,
         "consumer_count": 1, "consumer_tp": 2,
         "gpu_offset": 0
     },
     {
-        "id": "2p4d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "2p4d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 2,
         "consumer_count": 1, "consumer_tp": 4,
@@ -82,24 +93,24 @@ TEST_MATRIX = [
 
     # --- Producer TP = 4 ---
     {
-        "id": "4p1d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "4p1d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 4,
         "consumer_count": 1, "consumer_tp": 1,
         "gpu_offset": 0
     },
     {
-        "id": "4p2d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "4p2d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 4,
         "consumer_count": 1, "consumer_tp": 2,
         "gpu_offset": 0
     },
     {
-        "id": "4p4d_llama3_70b",
-        "model_rel_path": "Llama-3.3-70B-Instruct",
+        "id": "4p4d_gpt-oss-120b",
+        "model_rel_path": "gpt-oss-120b",
         "type": "disaggregated",
         "producer_count": 1, "producer_tp": 4,
         "consumer_count": 1, "consumer_tp": 4,
@@ -116,14 +127,14 @@ COMMON_ENV = {
     "LMCACHE_CONFIG_FILE": "/app/lmcache_config.yaml",
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     "PYTHONHASHSEED": "0",
-    
+
     # [關鍵修正] 強制使用穩定的 V0 Engine，避開 V1 的初始化問題
     "VLLM_USE_V1": "0",
-    
+
     # [優化] 確保 NCCL 使用 P2P (MI300X 支援 xGMI)
     "NCCL_P2P_DISABLE": "0",
     # 如果沒有 Infiniband，可以加上這個避免偵測超時，但 MI300 機台通常有網卡
-    # "NCCL_IB_DISABLE": "1", 
+    # "NCCL_IB_DISABLE": "1",
 }
 
 def prepare_lmcache_source():
@@ -138,14 +149,14 @@ def prepare_lmcache_source():
 
 def generate_docker_compose(config, work_dir):
     services = {}
-    port_map = {}
 
     full_model_path = Path(MODELS_DIR) / config["model_rel_path"]
     if not full_model_path.exists():
         print(f"⚠️ 警告: 模型路徑不存在: {full_model_path}")
 
     # Redis
-    if config["type"] == "disaggregated":
+    # [修改] kv_both 模式也可能需要 Redis (取決於 lmcache_config，這裡統一啟動)
+    if config["type"] in ["disaggregated", "kv_both"]:
         services["redis"] = {
             "image": "bitnamilegacy/redis:7.4.2-debian-12-r6",
             "container_name": f"lmcache_redis_{config['id']}",
@@ -156,15 +167,10 @@ def generate_docker_compose(config, work_dir):
     vllm_template = {
         "image": "rocm/vllm-dev:nightly_main_20260112",
         "network_mode": "host",
-        
-        # [關鍵修正] 加回 ipc: host，這對 TP>1 的 NCCL 穩定性至關重要
         "ipc": "host",
-        
-        # [關鍵修正] 增加 SHM 大小，TP=4 需要更多緩衝
-        "shm_size": "64gb",
-        
+        "shm_size": "64gb", # TP8 建議保持較大的 SHM
         "group_add": ["video"],
-        "cap_add": ["SYS_PTRACE", "IPC_LOCK"], # 增加 IPC_LOCK
+        "cap_add": ["SYS_PTRACE", "IPC_LOCK"],
         "security_opt": ["seccomp:unconfined"],
         "devices": ["/dev/kfd:/dev/kfd", "/dev/dri:/dev/dri"],
         "volumes": [
@@ -185,11 +191,11 @@ def generate_docker_compose(config, work_dir):
     def build_command(role_json_content, port, tp_size):
         kv_json = "{" + role_json_content + "}"
         install_cmd = "python3 -m pip install --no-build-isolation -e /app/LMCache_src &&"
-        
-        vllm_cmd = f"""python3 -m vllm.entrypoints.openai.api_server 
-        --model /app/model --port {port} --tensor-parallel-size {tp_size} 
+
+        vllm_cmd = f"""python3 -m vllm.entrypoints.openai.api_server
+        --model /app/model --port {port} --tensor-parallel-size {tp_size}
         --max-model-len 32768 --kv-transfer-config "{kv_json}" --gpu-memory-utilization 0.95"""
-        
+
         full_cmd = f"{install_cmd} {vllm_cmd}"
         return "bash -c '" + full_cmd.replace("\n", " ") + "'"
 
@@ -197,48 +203,58 @@ def generate_docker_compose(config, work_dir):
     if config["type"] == "disaggregated":
         p_count = config["producer_count"]
         p_tp = config["producer_tp"]
-        
+
         for i in range(p_count):
             container_name = f"lmcache_{config['id']}_p{i}"
             s_name = f"producer_{i}"
-            
+
             gpu_list = [str(x) for x in range(current_gpu_idx, current_gpu_idx + p_tp)]
             current_gpu_idx += p_tp
-            
+
             svc = deepcopy(vllm_template)
             svc["container_name"] = container_name
             svc["environment"]["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_list)
-            
+
             svc["command"] = build_command(get_kv_config("kv_producer"), base_port, p_tp)
             svc["depends_on"] = ["redis"]
-            
+
             services[s_name] = svc
             port_map[base_port] = container_name
             base_port += 1
 
-    # --- Consumers ---
+    # --- Consumers (or Combined/Standalone) ---
     c_count = config["consumer_count"]
     c_tp = config["consumer_tp"]
-    
+
     for i in range(c_count):
-        container_name = f"lmcache_{config['id']}_c{i}" if config["type"] == "disaggregated" else "vllm_standalone"
-        s_name = f"consumer_{i}" if config["type"] == "disaggregated" else "vllm_standalone"
-        
+        # 命名規則：disaggregated 用 c{i}, 其他用 standalone/kvboth
+        suffix = f"c{i}" if config["type"] == "disaggregated" else f"kvboth_{i}"
+        container_name = f"lmcache_{config['id']}_{suffix}"
+        s_name = f"consumer_{i}" # 保持 consumer 名稱以便測試腳本識別
+
         gpu_list = [str(x) for x in range(current_gpu_idx, current_gpu_idx + c_tp)]
         current_gpu_idx += c_tp
-        
+
         svc = deepcopy(vllm_template)
         svc["container_name"] = container_name
         svc["environment"]["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_list)
-        
+
+        # [修改] 根據類型決定啟動指令
         if config["type"] == "disaggregated":
             kv_role_config = get_kv_config("kv_consumer")
             svc["depends_on"] = ["redis"]
             svc["command"] = build_command(kv_role_config, base_port, c_tp)
+
+        elif config["type"] == "kv_both":
+            # [新增] kv_both 邏輯：安裝 LMCache 並設定角色為 kv_both
+            kv_role_config = get_kv_config("kv_both")
+            svc["depends_on"] = ["redis"]
+            svc["command"] = build_command(kv_role_config, base_port, c_tp)
+
         else:
-            # Baseline
-            cmd = f"""python3 -m vllm.entrypoints.openai.api_server 
-                --model /app/model --port {base_port} --tensor-parallel-size {c_tp} 
+            # Baseline (Pure vLLM without LMCache)
+            cmd = f"""python3 -m vllm.entrypoints.openai.api_server
+                --model /app/model --port {base_port} --tensor-parallel-size {c_tp}
                 --gpu-memory-utilization 0.95 --max-model-len 32768"""
             svc["command"] = "bash -c '" + cmd.replace("\n", " ") + "'"
 
@@ -319,9 +335,9 @@ def run_single_benchmark(config):
 
         if wait_for_services(port_map, timeout=900):
             sorted_ports = sorted(port_map.keys())
-            
+
             p_count = config.get("producer_count", 0)
-            
+
             if config["type"] == "disaggregated":
                 p_urls = ",".join([f"http://localhost:{p}/v1" for p in sorted_ports[:p_count]])
                 c_urls = ",".join([f"http://localhost:{p}/v1" for p in sorted_ports[p_count:]])
