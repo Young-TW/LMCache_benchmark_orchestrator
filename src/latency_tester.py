@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from openai import OpenAI
 
-import src.prompt as prompt_module
+import prompt as prompt_module
 
 def measure_request(client, model_name, prompt, max_tokens=20):
     """
