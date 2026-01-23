@@ -1,0 +1,4 @@
+chunk_size: 2048
+local_device: "cpu"
+remote_url: "redis://localhost:6379"
+remote_serde: "cachegen"
