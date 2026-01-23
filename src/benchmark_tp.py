@@ -267,14 +267,10 @@ def generate_docker_compose(config, work_dir):
     with open(work_dir / "docker-compose.yaml", "w") as f:
         yaml.dump({"version": "3.8", "services": services}, f)
 
-    lmcache_conf = """
-chunk_size: 2048
-local_device: "cpu"
-remote_url: "redis://localhost:6379"
-remote_serde: "cachegen"
-    """
-    with open(work_dir / "lmcache_config.yaml", "w") as f:
-        f.write(lmcache_conf)
+    with open(CURRENT_FILE.parent / "config" / "lmcache_config.yaml", "r") as f:
+        lmcache_template = f.read()
+        with open(work_dir / "lmcache_config.yaml", "w") as f:
+            f.write(lmcache_template)
 
     return port_map
 
