@@ -149,6 +149,7 @@ def prepare_lmcache_source():
 
 def generate_docker_compose(config, work_dir):
     services = {}
+    port_map = {}
 
     full_model_path = Path(MODELS_DIR) / config["model_rel_path"]
     if not full_model_path.exists():
