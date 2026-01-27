@@ -15,13 +15,13 @@ PLOTS_DIR = PROJECT_ROOT / "plots"
 def parse_test_id(test_id):
     """
     根據新規則解析 ID:
-    1. 1n_{model_name} -> Type: kv_both, Topology: Baseline (TP8)
+    1. tp{n}_{model_name} -> Type: kv_both, Topology: Baseline (TP8)
     2. {topology}_{model_name} -> Type: disaggregated, Topology: {topology}
     """
-    if test_id.startswith("1n_"):
+    if test_id.startswith("tp1_") or test_id.startswith("tp2_") or test_id.startswith("tp4_") or test_id.startswith("tp8_"):
         test_type = "kv_both"
-        topology = "Baseline (TP8)"
-        model_name = test_id[3:] # 切掉 "1n_"
+        topology = "Baseline (TP{})".format(test_id[2])
+        model_name = test_id[4:]
     else:
         test_type = "disaggregated"
         parts = test_id.split('_')
