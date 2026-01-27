@@ -101,8 +101,8 @@ def load_reports():
                     "Topology": topology,
                     "P_Count": config.get("producer_count", 0),
                     "C_Count": config.get("consumer_count", 1),
-                    "Producer TTFT (s)": round(p_ttft, 4),
-                    "Consumer TTFT (s)": round(c_ttft, 4),
+                    "Producer TTFT (ms)": round(p_ttft, 4),
+                    "Consumer TTFT (ms)": round(c_ttft, 4),
                     "Producer TPS": round(p_tps, 2),
                     "Consumer TPS": round(c_tps, 2),
                     "Speedup (x)": round(speedup, 2)
@@ -128,7 +128,7 @@ def print_summary_table(df):
     print("📊 LMCache Benchmark Summary")
     print("="*110)
     try:
-        view_cols = ["Model", "Topology", "Producer TTFT (s)", "Consumer TTFT (s)", "Consumer TPS", "Speedup (x)"]
+        view_cols = ["Model", "Topology", "Producer TTFT (ms)", "Consumer TTFT (ms)", "Consumer TPS", "Speedup (x)"]
         print(df_sorted[view_cols].to_markdown(index=False))
     except ImportError:
         print(df_sorted.to_string(index=False))
@@ -149,22 +149,22 @@ def plot_charts(df):
         # --- 圖表 1: TTFT ---
         df_ttft = model_df.melt(
             id_vars=["Topology"],
-            value_vars=["Producer TTFT (s)", "Consumer TTFT (s)"],
+            value_vars=["Producer TTFT (ms)", "Consumer TTFT (ms)"],
             var_name="Role",
-            value_name="Time (s)"
+            value_name="Time (ms)"
         )
-        df_ttft = df_ttft[df_ttft["Time (s)"] > 0]
+        df_ttft = df_ttft[df_ttft["Time (ms)"] > 0]
 
         plt.figure(figsize=(12, 6))
         ax1 = sns.barplot(
-            data=df_ttft, x="Topology", y="Time (s)", hue="Role",
-            palette={"Producer TTFT (s)": "#e74c3c", "Consumer TTFT (s)": "#2ecc71"}
+            data=df_ttft, x="Topology", y="Time (ms)", hue="Role",
+            palette={"Producer TTFT (ms)": "#e74c3c", "Consumer TTFT (ms)": "#2ecc71"}
         )
         for container in ax1.containers:
             ax1.bar_label(container, fmt='%.2f')
 
         plt.title(f"LMCache Latency (TTFT): {model}")
-        plt.ylabel("Time to First Token (s) [Lower is Better]")
+        plt.ylabel("Time to First Token (ms) [Lower is Better]")
         plt.xticks(rotation=45)
         plt.tight_layout()
         plt.savefig(PLOTS_DIR / f"benchmark_ttft_{model}.png")
