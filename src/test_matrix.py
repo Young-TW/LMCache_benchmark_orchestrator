@@ -4,41 +4,41 @@ TEST_MATRIX = [
     {
         "id": "tp1_gpt-oss-120b",
         "model_rel_path": "gpt-oss-120b",
-        "type": "kv_both",          # 新增這種類型
-        "producer_count": 0,        # kv_both 不需要獨立的 producer
+        "type": "kv_both",
+        "producer_count": 0,
         "producer_tp": 0,
-        "consumer_count": 1,        # 單一實例
-        "consumer_tp": 1,           # TP=1
+        "consumer_count": 1,
+        "consumer_tp": 1,
         "gpu_offset": 0
     },
     {
         "id": "tp2_gpt-oss-120b",
         "model_rel_path": "gpt-oss-120b",
-        "type": "kv_both",          # 新增這種類型
-        "producer_count": 0,        # kv_both 不需要獨立的 producer
+        "type": "kv_both",
+        "producer_count": 0,
         "producer_tp": 0,
-        "consumer_count": 1,        # 單一實例
-        "consumer_tp": 2,           # TP=2
+        "consumer_count": 1,
+        "consumer_tp": 2,
         "gpu_offset": 0
     },
     {
         "id": "tp4_gpt-oss-120b",
         "model_rel_path": "gpt-oss-120b",
-        "type": "kv_both",          # 新增這種類型
-        "producer_count": 0,        # kv_both 不需要獨立的 producer
+        "type": "kv_both",
+        "producer_count": 0,
         "producer_tp": 0,
-        "consumer_count": 1,        # 單一實例
-        "consumer_tp": 4,           # TP=4
+        "consumer_count": 1,
+        "consumer_tp": 4,
         "gpu_offset": 0
     },
     {
         "id": "tp8_gpt-oss-120b",
         "model_rel_path": "gpt-oss-120b",
-        "type": "kv_both",          # 新增這種類型
-        "producer_count": 0,        # kv_both 不需要獨立的 producer
+        "type": "kv_both",
+        "producer_count": 0,
         "producer_tp": 0,
-        "consumer_count": 1,        # 單一實例
-        "consumer_tp": 8,           # TP=8
+        "consumer_count": 1,
+        "consumer_tp": 8,
         "gpu_offset": 0
     },
     # --- Producer TP = 1 ---
